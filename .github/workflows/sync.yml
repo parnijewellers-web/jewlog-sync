@@ -1,0 +1,36 @@
+name: JwelLog to WooCommerce sync
+
+on:
+  schedule:
+    - cron: "5-55/5 * * * *"   # every 5 minutes: stock only
+    - cron: "0 * * * *"        # top of every hour: stock + prices
+  workflow_dispatch:           # lets you run it by hand from the Actions tab
+
+permissions:
+  contents: read               # the job can read the code, nothing else
+
+concurrency:
+  group: jewlog-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+      - run: python jewlog_to_woocommerce.py
+        env:
+          JEWLOG_USER: ${{ secrets.JEWLOG_USER }}
+          JEWLOG_PASS: ${{ secrets.JEWLOG_PASS }}
+          WC_KEY: ${{ secrets.WC_KEY }}
+          WC_SECRET: ${{ secrets.WC_SECRET }}
+          SYNC_MODE: create
+          NEW_STATUS: publish
+          DRY_RUN: "false"
+          QUIET: "true"        # logs show totals only, no product details
+          UPDATE_PRICES: ${{ github.event.schedule == '0 * * * *' }}
