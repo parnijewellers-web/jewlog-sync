@@ -13,6 +13,7 @@ Optional: SYNC_MODE (stock|create), DRY_RUN (true|false), UPDATE_PRICES (true|fa
           PRICE_FIELD (customer_mrp|mrp), JEWLOG_BASE, WP_SITE
 """
 import os
+import sys
 import time
 import requests
 
@@ -23,6 +24,14 @@ MODE = os.getenv("SYNC_MODE", "stock")
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() != "false"
 UPDATE_PRICES = os.getenv("UPDATE_PRICES", "false").lower() == "true"
 NEW_STATUS = os.getenv("NEW_STATUS", "publish")      # "publish" = live, "draft" = hidden
+# QUIET=true: print only totals (no SKUs, names, prices or stock) - used on GitHub (public logs)
+QUIET = os.getenv("QUIET", "false").lower() == "true"
+stats = {"created": 0, "updated": 0, "failed": 0}
+
+
+def log(msg):
+    if not QUIET:
+        print(msg)
 
 WC_API = f"{WP_SITE}/wp-json/wc/v3"
 WC_AUTH = (os.getenv("WC_KEY"), os.getenv("WC_SECRET"))
@@ -107,13 +116,13 @@ def category_id(name):
     key = name.lower()
     if key not in _cats:
         if DRY_RUN:
-            print(f"[dry] would create category: {name}")
+            log(f"[dry] would create category: {name}")
             return None
         r = requests.post(f"{WC_API}/products/categories", json={"name": name},
                           auth=WC_AUTH, timeout=30)
         r.raise_for_status()
         _cats[key] = r.json()["id"]
-        print(f"created category: {name}")
+        log(f"created category: {name}")
     return _cats[key]
 
 
@@ -145,17 +154,18 @@ def sync(p, token):
                 changes["categories"] = [{"id": cid}]
         if not changes:
             return
-        print(f"{tag}update {sku}: {changes}")
+        stats["updated"] += 1
+        log(f"{tag}update {sku}: {changes}")
         if not DRY_RUN:
             requests.put(f"{WC_API}/products/{existing['id']}", json=changes,
                          auth=WC_AUTH, timeout=30).raise_for_status()
         return
 
     if MODE != "create":
-        print(f"skip (not in WooCommerce): {sku}")
+        log(f"skip (not in WooCommerce): {sku}")
         return
     if p.get("total") is None:      # blank "parent/template" rows in JwelLog
-        print(f"skip (template row): {sku}")
+        log(f"skip (template row): {sku}")
         return
 
     price = jewlog_price(token, p["id"])
@@ -175,16 +185,25 @@ def sync(p, token):
         body["categories"] = [{"id": cid}]
     if price > 0:
         body["regular_price"] = str(price)
-    print(f"{tag}create {body['status']} {sku} ({body['name']}) price={price} stock={stock}")
+    stats["created"] += 1
+    log(f"{tag}create {body['status']} {sku} ({body['name']}) price={price} stock={stock}")
     if not DRY_RUN:
         requests.post(f"{WC_API}/products", json=body, auth=WC_AUTH, timeout=30).raise_for_status()
 
 
 if __name__ == "__main__":
-    print(f"MODE={MODE} DRY_RUN={DRY_RUN} UPDATE_PRICES={UPDATE_PRICES} NEW_STATUS={NEW_STATUS}")
+    print(f"MODE={MODE} DRY_RUN={DRY_RUN} UPDATE_PRICES={UPDATE_PRICES} NEW_STATUS={NEW_STATUS} QUIET={QUIET}")
     tok = jewlog_login()
     for prod in jewlog_get(tok, "/api/products").get("products", []):
         try:
             sync(prod, tok)
-        except requests.HTTPError as e:
-            print(f"failed {prod.get('sku')}: {e}")
+        except Exception as e:
+            stats["failed"] += 1
+            if QUIET:
+                code = getattr(getattr(e, "response", None), "status_code", "")
+                print(f"a product failed ({type(e).__name__} {code})")
+            else:
+                print(f"failed {prod.get('sku')}: {e}")
+    print(f"done: created={stats['created']} updated={stats['updated']} failed={stats['failed']}")
+    if stats["failed"]:
+        sys.exit(1)      # marks the GitHub run as failed so you get an email
